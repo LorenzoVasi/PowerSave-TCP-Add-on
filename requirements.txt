@@ -1,0 +1,4 @@
+python-wakeonlan
+requests
+pyyaml
+psutil
