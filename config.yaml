@@ -1,9 +1,4 @@
 - listenport: 25565
-  mac_address: "XX:XX:XX:XX:XX:XX"
-  target_ip: "192.168.1.100"
+  mac_address: "04-42-1A-04-21-6C"
+  target_ip: "192.168.1.176"
   target_port: 25565
-
-- listenport: 8096
-  mac_address: "XX:XX:XX:XX:XX:XX"
-  target_ip: "192.168.1.100"
-  target_port: 8096

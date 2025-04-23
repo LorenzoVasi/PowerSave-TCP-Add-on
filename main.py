@@ -16,32 +16,17 @@ def load_config(config_file):
     with open(config_file, 'r') as f:
         return yaml.safe_load(f)
 
-
-#region "Machine Management" -------
-
 def wake_on_lan(mac_address):
-    print(f"Inviando pacchetto Wake-on-LAN a {mac_address}...")
-    send_magic_packet(mac_address)
+    send_magic_packet(mac_address, ip_address="192.168.1.255", port=9)
 
 def shutdown_machine(mac_address):
     # Funzione per spegnere la macchina tramite WOL
     pass
 
-#endregion ---------------------
-
-#region "handle_traffic" -------
-
-def start_tcp_proxy(listen_port, target_ip, target_port, mac_address):
-    # Comando per reindirizzare il traffico TCP
-    socat_command = f"socat TCP-LISTEN:{listen_port},fork TCP:{target_ip}:{target_port}"
-    print(f"Avviando il proxy TCP su porta {listen_port}...")
-    run(socat_command, shell=True)
 
 def stop_proxy(listen_port):
     print(f"Chiudendo proxy su porta {listen_port}...")
     os.system(f"fuser -k {listen_port}/tcp")
-
-#endregion ---------------------
 
 def monitor_inactivity():
     while True:
@@ -58,31 +43,66 @@ def monitor_inactivity():
 
 # Funzione per ascoltare la porta e gestire la connessione
 def listen_for_connection(listen_port, mac_address, target_ip, target_port):
-    # Creiamo un socket per il server
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    
-    # Bind per associare il socket a una porta e un indirizzo IP
-    server_socket.bind(('0.0.0.0', listen_port))  # 0.0.0.0 permette di ascoltare tutte le interfacce
-    server_socket.listen(5)  # Ascolta fino a 5 connessioni in attesa
+    def handle_client(client_socket):
+        try:
+            target_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            target_socket.connect((target_ip, target_port))
+            print(f"[PROXY] Reindirizzazione stabilita con {target_ip}:{target_port}")
+        except Exception as e:
+            print(f"[ERROR] Connessione al target fallita: {e}")
+            client_socket.close()
+            return
 
-    print(f"Server in ascolto sulla porta {listen_port}...")
+        def forward(src, dst):
+            try:
+                while True:
+                    data = src.recv(4096)
+                    if not data:
+                        break
+                    try:
+                        dst.sendall(data)
+                    except (BrokenPipeError, OSError):
+                        break
+            except Exception as e:
+                print(f"[FORWARD ERROR] {e}")
+            finally:
+                try:
+                    src.shutdown(socket.SHUT_RDWR)
+                except:
+                    pass
+                src.close()
+                try:
+                    dst.shutdown(socket.SHUT_RDWR)
+                except:
+                    pass
+                dst.close()
+
+        threading.Thread(target=forward, args=(client_socket, target_socket)).start()
+        threading.Thread(target=forward, args=(target_socket, client_socket)).start()
+
+    # Avvio socket per ascoltare
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server_socket.bind(('0.0.0.0', listen_port))
+    server_socket.listen(5)
+
+    print(f"[LISTENER+PROXY] In ascolto su porta {listen_port}...")
 
     while True:
-        # Iniziamo ad ascoltare la porta
-        client_socket, client_address = server_socket.accept()  # Accetta una connessione in arrivo, è un blocco
-        # Otteniamo l'indirizzo IP e la porta del client
-        print(f"Connessione accettata da {client_address}")
+        client_socket, client_address = server_socket.accept()
+        print(f"[LISTENER] Richiesta da {client_address}")
 
-        # Verifica se la connessione è già attiva
         if listen_port not in active_connections or not active_connections[listen_port]['active']:
-            # Se la connessione non è attiva, avvia la macchina tramite WOL
+            print(f"[WOL] Accendo la macchina {mac_address}...")
             wake_on_lan(mac_address)
-            threading.sleep(30)  # Attendi un attimo per dare tempo alla macchina di accendersi (in un futuro configurabile con YAML)
-            start_tcp_proxy(listen_port, target_ip, target_port, mac_address)
-            active_connections[listen_port] = {'active': True, 'last_activity': time.time()}
+            time.sleep(5)  # Aspetta un po' che si accenda
 
-        # Aggiorna il tempo di attività ogni volta che arriva un pacchetto
-        active_connections[listen_port]['last_activity'] = time.time()
+            active_connections[listen_port] = {'active': True, 'last_activity': time.time(), 'mac_address': mac_address}
+        else:
+            active_connections[listen_port]['last_activity'] = time.time()
+
+        # Lancia la connessione proxy
+        threading.Thread(target=handle_client, args=(client_socket,)).start()
 
 def main():
 
@@ -99,6 +119,11 @@ def main():
         target_ip = server['target_ip']
         target_port = server['target_port']
         
+        # Verifica se la porta è già in uso
+        if listenport in active_connections:
+            print(f"Porta {listenport} già in uso.")
+            continue
+
         # Avvia un thread separato per ogni configurazione
         listen_thread = threading.Thread(target=listen_for_connection, 
                                          args=(listenport, mac_address, target_ip, target_port))

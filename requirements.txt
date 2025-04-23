@@ -1,4 +1,4 @@
-python-wakeonlan
+wakeonlan
 requests
 pyyaml
 psutil
