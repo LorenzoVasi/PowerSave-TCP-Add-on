@@ -1,141 +1,184 @@
 import os
 import time
 import socket
-import psutil
 import yaml
 from wakeonlan import send_magic_packet
-from subprocess import run
 import threading
-from subprocess import Popen
+import requests
+import logging
+import selectors
+import errno
 
-# Variabili globali per monitorare lo stato della connessione
-active_connections = {}
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Funzione per caricare il file di configurazione YAML
-def load_config(config_file):
-    with open(config_file, 'r') as f:
-        return yaml.safe_load(f)
+# Config per porta e sincronizzazione HA
+ha_call_config = {}
 
-def wake_on_lan(mac_address):
-    send_magic_packet(mac_address, ip_address="192.168.1.255", port=9)
+# Buffer size per proxy
+BUFFER_SIZE = 4096
 
-def shutdown_machine(mac_address):
-    # Funzione per spegnere la macchina tramite WOL
-    pass
+# Cache per trigger HA
+ha_trigger_cache = {}  # {port: last_trigger_timestamp}
+TRIGGER_TIMEOUT = 300  # secondi
 
+# Cache connessioni multiple: {port: [client_sock]}
+pending_clients = {}
 
-def stop_proxy(listen_port):
-    print(f"Chiudendo proxy su porta {listen_port}...")
-    os.system(f"fuser -k {listen_port}/tcp")
+class PortProxy:
+    def __init__(self, port, target_ip, target_port):
+        self.port = port
+        self.target_ip = target_ip
+        self.target_port = target_port
+        self.sel = selectors.DefaultSelector()
+        self.server = None
+        self.running = False
+        self.is_target_ready = False
 
-def monitor_inactivity():
-    while True:
-        current_time = time.time()
-        for listen_port, connection in active_connections.items():
-            # Se la connessione è stata inattiva per più di 10 minuti, spegnila
-            if current_time - connection['last_activity'] > 600:  # 600 secondi = 10 minuti
-                print(f"Connessione sulla porta {listen_port} inattiva. Spegnimento della macchina.")
-                # Chiudi il proxy e spegni la macchina
-                stop_proxy(listen_port)
-                shutdown_machine(connection['mac_address'])
-                active_connections[listen_port]['active'] = False
-        time.sleep(60)  # Verifica l'inattività ogni minuto
+    def start(self):
+        self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.server.bind(('0.0.0.0', self.port))
+        self.server.listen()
+        self.server.setblocking(False)
+        self.sel.register(self.server, selectors.EVENT_READ, self._accept)
+        self.running = True
+        threading.Thread(target=self._run_event_loop, daemon=True).start()
+        logging.info(f"PortProxy listening on {self.port}")
 
-# Funzione per ascoltare la porta e gestire la connessione
-def listen_for_connection(listen_port, mac_address, target_ip, target_port):
-    def handle_client(client_socket):
+    def _accept(self, sock):
         try:
-            target_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            target_socket.connect((target_ip, target_port))
-            print(f"[PROXY] Reindirizzazione stabilita con {target_ip}:{target_port}")
+            client_sock, addr = sock.accept()
         except Exception as e:
-            print(f"[ERROR] Connessione al target fallita: {e}")
-            client_socket.close()
+            logging.error(f"Accept error on port {self.port}: {e}")
             return
 
-        def forward(src, dst):
-            try:
-                while True:
-                    data = src.recv(4096)
-                    if not data:
-                        break
-                    try:
-                        dst.sendall(data)
-                    except (BrokenPipeError, OSError):
-                        break
-            except Exception as e:
-                print(f"[FORWARD ERROR] {e}")
-            finally:
-                try:
-                    src.shutdown(socket.SHUT_RDWR)
-                except:
-                    pass
-                src.close()
-                try:
-                    dst.shutdown(socket.SHUT_RDWR)
-                except:
-                    pass
-                dst.close()
+        logging.info(f"Accepted {addr} on port {self.port}")
+        client_sock.setblocking(False)
 
-        threading.Thread(target=forward, args=(client_socket, target_socket)).start()
-        threading.Thread(target=forward, args=(target_socket, client_socket)).start()
-
-    # Avvio socket per ascoltare
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server_socket.bind(('0.0.0.0', listen_port))
-    server_socket.listen(5)
-
-    print(f"[LISTENER+PROXY] In ascolto su porta {listen_port}...")
-
-    while True:
-        client_socket, client_address = server_socket.accept()
-        print(f"[LISTENER] Richiesta da {client_address}")
-
-        if listen_port not in active_connections or not active_connections[listen_port]['active']:
-            print(f"[WOL] Accendo la macchina {mac_address}...")
-            wake_on_lan(mac_address)
-            time.sleep(5)  # Aspetta un po' che si accenda
-
-            active_connections[listen_port] = {'active': True, 'last_activity': time.time(), 'mac_address': mac_address}
+        if self.is_target_ready:
+            self._handle_proxy(client_sock)
         else:
-            active_connections[listen_port]['last_activity'] = time.time()
+            pending_clients.setdefault(self.port, []).append(client_sock)
+            if len(pending_clients[self.port]) == 1:
+                self._trigger_ha_and_wait()
 
-        # Lancia la connessione proxy
-        threading.Thread(target=handle_client, args=(client_socket,)).start()
+    def _trigger_ha_and_wait(self):
+        cfg = ha_call_config[self.port]
+        now = time.time()
+        last_trigger = ha_trigger_cache.get(self.port, 0)
+        if now - last_trigger < TRIGGER_TIMEOUT:
+            logging.info(f"HA trigger recently done for port {self.port}, skipping...")
+            self._wait_target_ready()
+            return
+
+        if not send_REST_API_and_wait(self.port, cfg['url'], cfg['token'], cfg['automation']):
+            logging.error(f"HA call failed for port {self.port}")
+            self._cleanup_pending_clients()
+            return
+
+        ha_trigger_cache[self.port] = now
+        self._wait_target_ready()
+
+    def _wait_target_ready(self):
+        def check():
+            for i in range(60):
+                try:
+                    s = socket.create_connection((self.target_ip, self.target_port), timeout=2)
+                    s.close()
+                    self.is_target_ready = True
+                    logging.info(f"Target ready on port {self.port}")
+                    for c in pending_clients.pop(self.port, []):
+                        self._handle_proxy(c)
+                    return
+                except Exception:
+                    time.sleep(1)
+            logging.error(f"Timeout waiting for target on port {self.port}")
+            self._cleanup_pending_clients()
+        threading.Thread(target=check, daemon=True).start()
+
+    def _handle_proxy(self, client_sock):
+        try:
+            target_sock = socket.create_connection((self.target_ip, self.target_port))
+            target_sock.setblocking(False)
+            self.sel.register(client_sock, selectors.EVENT_READ, lambda sock: self._forward(sock, target_sock))
+            self.sel.register(target_sock, selectors.EVENT_READ, lambda sock: self._forward(sock, client_sock))
+            logging.info(f"Proxy established on port {self.port}")
+        except Exception as e:
+            logging.error(f"Failed to connect to target on port {self.port}: {e}")
+            client_sock.close()
+
+    def _forward(self, src_sock, dst_sock):
+        try:
+            data = src_sock.recv(BUFFER_SIZE)
+            if data:
+                dst_sock.sendall(data)
+            else:
+                self._cleanup(src_sock, dst_sock)
+        except socket.error as e:
+            if e.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+                return
+            logging.error(f"Forward error on port {self.port}: {e}")
+            self._cleanup(src_sock, dst_sock)
+
+    def _cleanup(self, sock1, sock2):
+        for s in (sock1, sock2):
+            try: self.sel.unregister(s)
+            except: pass
+            try: s.close()
+            except: pass
+
+    def _cleanup_pending_clients(self):
+        for sock in pending_clients.pop(self.port, []):
+            try: sock.close()
+            except: pass
+
+    def _run_event_loop(self):
+        while self.running:
+            events = self.sel.select(timeout=1)
+            for key, _ in events:
+                callback = key.data
+                callback(key.fileobj)
+
+
+def send_REST_API_and_wait(port, ha_url, ha_token, ha_automation_id):
+    logging.info(f"Triggering HA automation for port {port}")
+    headers = {"Authorization": f"Bearer {ha_token}", "Content-Type": "application/json"}
+    url = f"{ha_url}/api/services/automation/trigger"
+    payload = {"entity_id": ha_automation_id}
+    try:
+        resp = requests.post(url, json=payload, headers=headers)
+        if resp.status_code != 200:
+            logging.error(f"HA call failed {resp.status_code}: {resp.text}")
+            return False
+    except Exception as e:
+        logging.error(f"Exception during HA call: {e}")
+        return False
+    return True
+
+
+def load_config(path='config.yaml'):
+    with open(path) as f:
+        return yaml.safe_load(f)
+
 
 def main():
-
-    # Carica la configurazione dal file YAML
-    try:
-        config = load_config('config.yaml')
-    except Exception as e:
-        print(f"Errore nel caricare la configurazione: {e}")
-        return 1
-    
-    for server in config:  # Itera su ogni configurazione (dizionario)
-        listenport = server['listenport']
-        mac_address = server['mac_address']
-        target_ip = server['target_ip']
-        target_port = server['target_port']
-        
-        # Verifica se la porta è già in uso
-        if listenport in active_connections:
-            print(f"Porta {listenport} già in uso.")
-            continue
-
-        # Avvia un thread separato per ogni configurazione
-        listen_thread = threading.Thread(target=listen_for_connection, 
-                                         args=(listenport, mac_address, target_ip, target_port))
-        listen_thread.daemon = True  # Imposta il thread come daemon per terminare con il programma principale
-        listen_thread.start()
-        
-    # Mantieni il main thread in esecuzione per non fermare il programma
+    cfgs = load_config()
+    for c in cfgs:
+        ha_call_config[c['listenport']] = {
+            'url': c['ha_url'], 'token': c['ha_token'], 'automation': c['ha_automation_id']
+        }
+    proxies = []
+    for c in cfgs:
+        p = PortProxy(c['listenport'], c['target_ip_proxy'], c['target_port_proxy'])
+        p.start()
+        proxies.append(p)
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        print("Interruzione del programma.")
+        logging.info("Shutting down...")
+        for p in proxies:
+            p.running = False
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

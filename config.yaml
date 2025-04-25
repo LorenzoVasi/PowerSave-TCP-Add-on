@@ -1,4 +1,6 @@
-- listenport: 25565
-  mac_address: "04-42-1A-04-21-6C"
-  target_ip: "192.168.1.176"
-  target_port: 25565
+- listenport: PORT (ex. 25565)
+  target_ip_proxy: "192.168.1.xx"
+  target_port_proxy: PORT (ex. 25565)
+  ha_url: HOMEASSISTANT_URL (ex. http://192.168.1.xx:8123)
+  ha_token: "YOUR_LONG_LIVED_ACCESS_TOKEN"
+  ha_automation_id: YOUR_AUTOMATION_ID (ex. automation.test_powersavetcp)
