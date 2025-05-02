@@ -1,4 +1,3 @@
+PyYAML
 wakeonlan
 requests
-pyyaml
-psutil

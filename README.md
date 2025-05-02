@@ -4,6 +4,28 @@ A containerized TCP proxy service for Home Assistant that detects incoming conne
 
 ## WORK IN PROGRESS
 
+Esempio di configurazione in YAML:
+
+```yaml
+- listenport: 25565
+  target_ip_proxy: "192.168.1.xx"
+  target_port_proxy: 25565
+  ha_url: IP
+  ha_token: "TOKEN"
+  ha_automation_id: automation.automationid1
+
+- listenport: 8096
+  target_ip_proxy: "192.168.1.xx"
+  target_port_proxy: 8096
+  ha_url: IP
+  ha_token: "TOKEN"
+  ha_automation_id: automation.automationid1/2/ect
+
+
+```
+
+
+
 ### Commit a492f7d
 
 Primi test effettuati:
@@ -20,4 +42,3 @@ Connessione diretta: Macchina2 -> Macchina1
 Connessione attraverso proxy: Macchina1 -> Macchina2 -> Macchina1
 
 | AVG: 57ms,42ms,48ms,36ms,39ms
-
