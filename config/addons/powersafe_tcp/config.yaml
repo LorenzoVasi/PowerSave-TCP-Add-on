@@ -1,0 +1,37 @@
+name: "Powersafe TCP Proxy"
+version: "0.1.0"
+slug: "powersafe_tcp"
+description: "TCP proxy with HA automation trigger"
+startup: application
+boot: auto
+host_network: true
+arch:
+  - amd64
+  - aarch64
+  - armv7
+
+options:
+  proxies:
+    - listenport: ...
+      target_ip_proxy: "..."
+      target_port_proxy: ...
+      target_ip_regions:
+        - "Region1"
+        - "..."
+      local_only: false
+      client_timeout: 60
+      ha_url: "..."
+      ha_token: "..."
+      ha_automation_id: "automation.example_automation_id"
+
+schema:
+  proxies:
+    - listenport: int
+      target_ip_proxy: str
+      target_port_proxy: int
+      target_ip_regions: [str]
+      local_only: bool
+      client_timeout: int
+      ha_url: str
+      ha_token: str
+      ha_automation_id: str

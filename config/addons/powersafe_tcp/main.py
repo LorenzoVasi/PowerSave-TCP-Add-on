@@ -27,7 +27,7 @@ active_clients = {}
 # Traccia l'IP del client, l'ultimo tempo di disconnessione, e se è in attesa di una nuova chiamata
 client_disconnect_times = {}
 
-CLIENT_TIMEOUT = 10  # Tempo massimo in secondi per non fare una nuova chiamata ad HA
+CLIENT_TIMEOUT = 60  # Tempo massimo in secondi per non fare una nuova chiamata ad HA
 
 def trigger_ha_async(port):
     def trigger():
@@ -49,7 +49,7 @@ def trigger_ha_async(port):
     threading.Thread(target=trigger, daemon=True).start()
 
 class PortProxy:
-    def __init__(self, port, target_ip, target_port, allowed_regions=None):
+    def __init__(self, port, target_ip, target_port, allowed_regions=None, local_only=False):
         self.port = port
         self.target_ip = target_ip
         self.target_port = target_port
@@ -59,6 +59,7 @@ class PortProxy:
         self.running = False
         self.is_target_ready = False
         active_clients[self.port] = []
+        self.local_only = local_only
 
     def start(self):
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -114,6 +115,9 @@ class PortProxy:
     def is_ip_allowed(self, ip):
         try:
             ip_obj = ipaddress.ip_address(ip)
+            if self.local_only:
+                return ip_obj.is_private or ip_obj.is_loopback
+
             if ip_obj.is_private or ip_obj.is_loopback:
                 return True
         except ValueError:
@@ -134,6 +138,7 @@ class PortProxy:
         except Exception as e:
             logging.warning(f"Errore nella geolocalizzazione IP {ip}: {e}")
             return False
+
 
     def _wait_target_ready(self):
         def check():
@@ -263,11 +268,9 @@ class CallbackHandler(BaseHTTPRequestHandler):
             self.wfile.write(str(e).encode())
 
 
-def load_config(filename='config.yaml'):
-    base_path = os.path.dirname(os.path.abspath(__file__))
-    config_path = os.path.join(base_path, filename)
-    with open(config_path, 'r') as f:
-        return yaml.safe_load(f)
+def load_config(filename='/data/options.json'):
+    with open(filename, 'r') as f:
+        return json.load(f)
 
 
 def start_callback_server(host='0.0.0.0', port=8080):
@@ -277,13 +280,17 @@ def start_callback_server(host='0.0.0.0', port=8080):
 
 
 def main():
-    cfgs = load_config()
+    config = load_config()
+    cfgs = config.get('proxies', [])
+
     for c in cfgs:
         ha_call_config[c['listenport']] = {
             'url': c['ha_url'],
             'token': c['ha_token'],
             'automation': c['ha_automation_id']
         }
+
+    CLIENT_TIMEOUT = cfgs[0].get('client_timeout', 60) if cfgs else 60
 
     proxies = []
     start_callback_server()
@@ -292,7 +299,8 @@ def main():
             c['listenport'],
             c['target_ip_proxy'],
             c['target_port_proxy'],
-            allowed_regions=c.get('target_ip_regions')
+            allowed_regions=c.get('target_ip_regions'),
+            local_only=c.get('local_only', False)
         )
         p.start()
         proxies.append(p)
@@ -303,6 +311,3 @@ def main():
     except KeyboardInterrupt:
         logging.info("Server stopped.")
 
-
-if __name__ == "__main__":
-    main()
