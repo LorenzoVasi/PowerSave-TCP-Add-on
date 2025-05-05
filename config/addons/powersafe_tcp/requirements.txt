@@ -1,3 +1,3 @@
-PyYAML
 wakeonlan
+PyYAML
 requests

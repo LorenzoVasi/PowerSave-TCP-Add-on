@@ -273,13 +273,14 @@ def load_config(filename='/data/options.json'):
         return json.load(f)
 
 
-def start_callback_server(host='0.0.0.0', port=8080):
+def start_callback_server(host='0.0.0.0', port=9999):
     server = HTTPServer((host, port), CallbackHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     logging.info(f"Callback HTTP server started on {host}:{port}")
 
 
 def main():
+    
     config = load_config()
     cfgs = config.get('proxies', [])
 
@@ -311,3 +312,12 @@ def main():
     except KeyboardInterrupt:
         logging.info("Server stopped.")
 
+
+if __name__ == '__main__':
+    try:
+        logging.info("Starting PortProxy...")
+        main()
+    except Exception as e:
+        logging.error(f"Error in main: {e}")
+        raise
+    

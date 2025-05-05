@@ -1,7 +1,7 @@
-name: "Powersafe TCP Proxy"
+name: Powersafe TCP Proxy
 version: "0.1.0"
-slug: "powersafe_tcp"
-description: "TCP proxy with HA automation trigger"
+slug: powersafe_tcp
+description: TCP proxy with HA automation trigger
 startup: application
 boot: auto
 host_network: true
@@ -12,24 +12,26 @@ arch:
 
 options:
   proxies:
-    - listenport: ...
-      target_ip_proxy: "..."
-      target_port_proxy: ...
+    - listenport: 1234
+      target_ip_proxy: 192.168.1.999
+      target_port_proxy: 1234
       target_ip_regions:
-        - "Region1"
-        - "..."
+        - Region1
+        - Region2
       local_only: false
       client_timeout: 60
-      ha_url: "..."
-      ha_token: "..."
-      ha_automation_id: "automation.example_automation_id"
+      ha_url: http://homeassistant.local
+      ha_token: your_long_lived_access_token
+      ha_automation_id: automation.example_automation_id
 
 schema:
   proxies:
+    - map
     - listenport: int
       target_ip_proxy: str
       target_port_proxy: int
-      target_ip_regions: [str]
+      target_ip_regions:
+        - str
       local_only: bool
       client_timeout: int
       ha_url: str
